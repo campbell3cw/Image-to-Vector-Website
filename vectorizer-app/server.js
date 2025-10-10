@@ -19,117 +19,119 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
+function kmeans(pixels, k, maxIter = 8) {
+  // pixels: array of [r,g,b]
+  const centroids = [];
+  for (let i = 0; i < k; i++) {
+    centroids.push(pixels[Math.floor(Math.random() * pixels.length)]);
+  }
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    const clusters = Array.from({ length: k }, () => []);
+    for (const p of pixels) {
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < k; i++) {
+        const [r, g, b] = centroids[i];
+        const d = (p[0] - r) ** 2 + (p[1] - g) ** 2 + (p[2] - b) ** 2;
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      }
+      clusters[best].push(p);
+    }
+    for (let i = 0; i < k; i++) {
+      if (clusters[i].length === 0) continue;
+      const avg = [0, 0, 0];
+      for (const p of clusters[i]) {
+        avg[0] += p[0];
+        avg[1] += p[1];
+        avg[2] += p[2];
+      }
+      centroids[i] = avg.map((v) => v / clusters[i].length);
+    }
+  }
+  return centroids;
+}
+
 app.post("/trace", upload.single("image"), async (req, res) => {
   console.log("📤 /trace called");
   try {
     if (!req.file) return res.status(400).send("No image uploaded");
 
-    const colorCount = parseInt(req.query.colors || req.body.colors || "1");
-    const targetWidth = parseInt(req.query.long || req.body.long || "800");
+    const colorCount = Math.max(
+      1,
+      Math.min(parseInt(req.query.colors || req.body.colors || "1"), 6)
+    );
+    const width = parseInt(req.query.long || req.body.long || "800");
     const tmpDir = os.tmpdir();
     const base = `trace-${Date.now()}`;
     const baseFile = path.join(tmpDir, `${base}-base.png`);
 
-    // --- Step 1: normalize & resize while keeping aspect ratio ---
-    const meta = await sharp(req.file.buffer).metadata();
-    const aspect = meta.width / meta.height;
-    const targetHeight = Math.round(targetWidth / aspect);
-
+    // Normalize and resize
     await sharp(req.file.buffer)
-      .resize({ width: targetWidth, height: targetHeight, withoutEnlargement: true })
+      .resize({ width, withoutEnlargement: true })
       .toColorspace("srgb")
       .median(1)
       .png()
       .toFile(baseFile);
 
-    // ---- Single color (unchanged) ----
-    if (colorCount <= 1) {
-      console.log("🖤 single-color mode");
+    // --- 1-color (same as before) ---
+    if (colorCount === 1) {
       potrace.trace(
         baseFile,
         { color: "black", background: "white", turdSize: 5 },
         (err, svg) => {
           fs.unlink(baseFile, () => {});
-          if (err) {
-            console.error("Potrace error:", err);
-            return res.status(500).send("Trace error");
-          }
+          if (err) return res.status(500).send("Trace error");
           res.type("image/svg+xml").send(svg);
         }
       );
       return;
     }
 
-    // ---- Multi-color improved ----
-    console.log(`🎨 multi-color mode (${colorCount} colors)`);
+    // --- Multi-color via K-means ---
+    console.log(`🎨 multi-color (${colorCount}) using k-means`);
 
     const { data, info } = await sharp(baseFile)
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    // Build brightness map + store rgb for sampling
-    const pxCount = info.width * info.height;
-    const gray = new Float32Array(pxCount);
-    const rgb = new Array(pxCount);
-    for (let i = 0, p = 0; i < data.length; i += info.channels, p++) {
-      const r = data[i],
-        g = data[i + 1],
-        b = data[i + 2];
-      gray[p] = 0.299 * r + 0.587 * g + 0.114 * b;
-      rgb[p] = [r, g, b];
+    const pixels = [];
+    for (let i = 0; i < data.length; i += info.channels) {
+      pixels.push([data[i], data[i + 1], data[i + 2]]);
     }
 
-    const min = Math.min(...gray);
-    const max = Math.max(...gray);
-    const step = (max - min) / colorCount;
-
-    const bands = [];
-    for (let i = 0; i < colorCount; i++) {
-      bands.push([min + step * i, min + step * (i + 1)]);
-    }
+    const centers = kmeans(pixels, colorCount);
+    console.log("🎯 centers:", centers.map((c) => c.map((v) => Math.round(v))));
 
     const layers = [];
 
-    for (let i = 0; i < bands.length; i++) {
-      const [low, high] = bands[i];
-      const mask = Buffer.alloc(pxCount * 3);
-
-      let rSum = 0,
-        gSum = 0,
-        bSum = 0,
-        n = 0;
-      for (let p = 0; p < pxCount; p++) {
-        const val = gray[p];
-        if (val >= low && val < high) {
-          mask[p * 3] = mask[p * 3 + 1] = mask[p * 3 + 2] = 255;
-          const [r, g, b] = rgb[p];
-          rSum += r;
-          gSum += g;
-          bSum += b;
-          n++;
-        } else {
-          mask[p * 3] = mask[p * 3 + 1] = mask[p * 3 + 2] = 0;
-        }
+    for (let i = 0; i < centers.length; i++) {
+      const [rC, gC, bC] = centers[i];
+      const mask = Buffer.alloc(info.width * info.height * 3);
+      for (let p = 0, px = 0; p < data.length; p += info.channels, px++) {
+        const diff =
+          (data[p] - rC) ** 2 +
+          (data[p + 1] - gC) ** 2 +
+          (data[p + 2] - bC) ** 2;
+        const val = diff < 4000 ? 255 : 0; // tolerance for cluster
+        mask[px * 3] = mask[px * 3 + 1] = mask[px * 3 + 2] = val;
       }
 
-      const avgColor =
-        n > 0
-          ? `rgb(${Math.round(rSum / n)},${Math.round(gSum / n)},${Math.round(
-              bSum / n
-            )})`
-          : `hsl(${(360 / colorCount) * i},80%,40%)`;
-
-      const maskFile = path.join(tmpDir, `${base}-band${i}.png`);
+      const maskFile = path.join(tmpDir, `${base}-mask${i}.png`);
       await sharp(mask, {
         raw: { width: info.width, height: info.height, channels: 3 },
       })
         .png()
         .toFile(maskFile);
 
+      const color = `rgb(${Math.round(rC)},${Math.round(gC)},${Math.round(bC)})`;
       const svgPart = await new Promise((resolve, reject) => {
         potrace.trace(
           maskFile,
-          { color: avgColor, background: "transparent", turdSize: 5 },
+          { color, background: "transparent", turdSize: 5 },
           (err, svg) => {
             fs.unlink(maskFile, () => {});
             if (err) reject(err);
@@ -137,7 +139,6 @@ app.post("/trace", upload.single("image"), async (req, res) => {
           }
         );
       });
-
       layers.push(svgPart.replace(/<\/?svg[^>]*>/g, ""));
     }
 
@@ -146,7 +147,6 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       ${layers.join("\n")}
     </svg>`;
 
-    console.log("✅ finished multi-color trace");
     res.type("image/svg+xml").send(svg);
   } catch (err) {
     console.error("🔥 trace exception:", err);
@@ -158,6 +158,4 @@ app.get("*", (_, res) =>
   res.sendFile(path.join(__dirname, "public", "index.html"))
 );
 
-app.listen(port, () => {
-  console.log(`🚀 Vectorizer running on port ${port}`);
-});
+app.listen(port, () => console.log(`🚀 Vectorizer running on port ${port}`));
