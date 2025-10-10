@@ -1,78 +1,123 @@
+// server.js
 import express from "express";
 import multer from "multer";
-import fs from "fs";
 import sharp from "sharp";
-import { trace } from "@luncheon/potrace-wasm";
+import { Potrace } from "potrace";
+import fs from "fs";
+import path from "path";
 
 const app = express();
-const upload = multer({ dest: "uploads/" });
+const port = process.env.PORT || 8080;
 
-// Ensure uploads dir exists in Docker/container
-fs.mkdirSync("uploads", { recursive: true });
+// Middleware
+app.use(express.static("."));
+app.use(express.json());
 
-// Light CSP so blob/data URLs and inline styles/scripts work
-app.use((req, res, next) => {
-  res.setHeader("Content-Security-Policy",
-    "default-src 'self' blob: data: https:; " +
-    "img-src 'self' blob: data: https:; " +
-    "script-src 'self' 'unsafe-inline' blob: data: https:; " +
-    "style-src 'self' 'unsafe-inline' blob: data: https:; " +
-    "font-src 'self' data: https:; connect-src 'self' blob: data: https:; " +
-    "object-src 'none'; base-uri 'self';");
-  next();
+// Multer setup (in-memory)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Health check for Railway
+app.get("/healthz", (req, res) => {
+  res.status(200).send("ok");
 });
 
-app.use(express.static("public"));
+// Adaptive threshold helper
+async function getAdaptiveThreshold(buffer) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .greyscale()
+      .resize({ width: 200 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
-app.get("/healthz", (req, res) => res.json({ ok: true }));
+    const pixels = Array.from(data);
+    const mean = pixels.reduce((a, b) => a + b, 0) / pixels.length;
+    const variance = pixels.reduce((a, b) => a + (b - mean) ** 2, 0) / pixels.length;
+    const stdDev = Math.sqrt(variance);
 
-// Vectorization endpoint with tunable params
+    // Dynamic threshold logic
+    const threshold = Math.max(60, Math.min(220, mean + stdDev * 0.5));
+    return threshold;
+  } catch (err) {
+    console.error("Adaptive threshold failed:", err);
+    return 128;
+  }
+}
+
+// POST /trace endpoint
 app.post("/trace", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("No image uploaded");
 
-    const th   = Number(req.query.th   ?? 180); // threshold 0..255
-    const blur = Number(req.query.blur ?? 1.0); // gaussian-ish blur radius
-    const long = Number(req.query.long ?? 800); // preprocess long side
-    const omit = Number(req.query.omit ?? 5);   // turdSize (drop tiny blobs)
+    const {
+      threshold = 180,
+      blur = 0,
+      omit = 5,
+      ltres = 0.8,
+      qtres = 1.0,
+      long = 800,
+      adaptive = true,
+      smooth = true
+    } = req.body;
 
-    const src = req.file.path;
-    const pre = src + "-pre.png";
+    let buffer = req.file.buffer;
 
-    // Preprocess: resize -> grayscale -> threshold -> blur
-    const meta = await sharp(src).metadata();
-    const w = meta.width || 0, h = meta.height || 0;
-    const resizeOpts = (w >= h) ? { width: Math.min(long, w) } : { height: Math.min(long, h) };
+    // Preprocess: resize and optional blur/smooth
+    let img = sharp(buffer).resize({ width: Number(long), withoutEnlargement: true }).greyscale();
 
-    await sharp(src)
-      .resize({ ...resizeOpts, fit: "inside", withoutEnlargement: true })
-      .grayscale()
-      .threshold(th)
-      .blur(blur)
-      .toFile(pre);
+    if (smooth) img = img.median(1); // reduces noise
+    if (blur && Number(blur) > 0) img = img.blur(Number(blur));
 
-    const svg = await trace(pre, {
-      threshold: th,
-      turdSize: omit,
-      turnPolicy: "black",
-      optCurve: true,
-      optTolerance: 0.3,
+    buffer = await img.toBuffer();
+
+    // Auto-threshold if requested
+    let thVal = Number(threshold);
+    if (adaptive === true || adaptive === "true") {
+      thVal = await getAdaptiveThreshold(buffer);
+      console.log("Adaptive threshold used:", thVal);
+    }
+
+    // Binarize image for tracing
+    const bwBuffer = await sharp(buffer)
+      .threshold(Math.round(thVal))
+      .toBuffer();
+
+    // Vectorize using Potrace
+    const options = {
+      threshold: 128, // Potrace uses binary input; threshold is handled above
+      turdSize: Number(omit) || 5,
+      ltres: Number(ltres) || 1,
+      qtres: Number(qtres) || 1,
+      optTolerance: 0.2,
       color: "black",
       background: "white"
-    });
+    };
 
-    fs.unlink(src, () => {});
-    fs.unlink(pre, () => {});
+    const tracer = new Potrace(options);
+    const svg = await new Promise((resolve, reject) => {
+      tracer.loadImage(bwBuffer, (err) => {
+        if (err) return reject(err);
+        tracer.getSVG((err, result) => {
+          if (err) reject(err);
+          else resolve(result);
+        });
+      });
+    });
 
     res.type("image/svg+xml").send(svg);
   } catch (err) {
-    console.error("Vectorization failed:", err);
-    res.status(500).send("Vectorization failed.");
+    console.error("Trace error:", err);
+    res.status(500).send("Vectorization failed");
   }
 });
 
-// Fallback to index
-app.get("*", (req, res) => res.sendFile(process.cwd() + "/public/index.html"));
+// Root route
+app.get("/", (req, res) => {
+  res.sendFile(path.join(process.cwd(), "index.html"));
+});
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log("Vector tool running on", port));
+// Start server
+app.listen(port, () => {
+  console.log(`✅ At Work Uniforms Vectorizer running on port ${port}`);
+});
