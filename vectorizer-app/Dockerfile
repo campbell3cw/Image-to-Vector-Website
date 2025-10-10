@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-# Sharp needs this on Alpine
+# Sharp dependency
 RUN apk add --no-cache libc6-compat
 
 WORKDIR /app
@@ -9,9 +9,8 @@ WORKDIR /app
 COPY package.json ./
 RUN npm ci --omit=dev
 
-# Copy app
-COPY server.js ./
-COPY public ./public
+# Copy app files (all root-level frontend assets)
+COPY . .
 
 ENV PORT=8080
 EXPOSE 8080
