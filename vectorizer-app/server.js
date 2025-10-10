@@ -19,21 +19,21 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
+/* ---------- Simple K-means clustering ---------- */
 function kmeans(pixels, k, maxIter = 8) {
-  // pixels: array of [r,g,b]
   const centroids = [];
-  for (let i = 0; i < k; i++) {
+  for (let i = 0; i < k; i++)
     centroids.push(pixels[Math.floor(Math.random() * pixels.length)]);
-  }
 
   for (let iter = 0; iter < maxIter; iter++) {
     const clusters = Array.from({ length: k }, () => []);
     for (const p of pixels) {
-      let best = 0;
-      let bestDist = Infinity;
+      let best = 0,
+        bestDist = Infinity;
       for (let i = 0; i < k; i++) {
-        const [r, g, b] = centroids[i];
-        const d = (p[0] - r) ** 2 + (p[1] - g) ** 2 + (p[2] - b) ** 2;
+        const c = centroids[i];
+        const d =
+          (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2;
         if (d < bestDist) {
           bestDist = d;
           best = i;
@@ -42,19 +42,20 @@ function kmeans(pixels, k, maxIter = 8) {
       clusters[best].push(p);
     }
     for (let i = 0; i < k; i++) {
-      if (clusters[i].length === 0) continue;
-      const avg = [0, 0, 0];
+      if (!clusters[i].length) continue;
+      const sum = [0, 0, 0];
       for (const p of clusters[i]) {
-        avg[0] += p[0];
-        avg[1] += p[1];
-        avg[2] += p[2];
+        sum[0] += p[0];
+        sum[1] += p[1];
+        sum[2] += p[2];
       }
-      centroids[i] = avg.map((v) => v / clusters[i].length);
+      centroids[i] = sum.map((v) => v / clusters[i].length);
     }
   }
   return centroids;
 }
 
+/* -------------------- /TRACE -------------------- */
 app.post("/trace", upload.single("image"), async (req, res) => {
   console.log("📤 /trace called");
   try {
@@ -69,61 +70,69 @@ app.post("/trace", upload.single("image"), async (req, res) => {
     const base = `trace-${Date.now()}`;
     const baseFile = path.join(tmpDir, `${base}-base.png`);
 
-    // Normalize and resize
+    // --- Preprocess: resize + mild denoise + close gaps ---
     await sharp(req.file.buffer)
       .resize({ width, withoutEnlargement: true })
       .toColorspace("srgb")
       .median(1)
+      .blur(0.3) // connect anti-aliased edges slightly
       .png()
       .toFile(baseFile);
 
-    // --- 1-color (same as before) ---
+    // --- 1-color embroidery mode (unchanged) ---
     if (colorCount === 1) {
       potrace.trace(
         baseFile,
-        { color: "black", background: "white", turdSize: 5 },
+        { color: "black", background: "white", turdSize: 3 },
         (err, svg) => {
           fs.unlink(baseFile, () => {});
-          if (err) return res.status(500).send("Trace error");
+          if (err) {
+            console.error("Potrace error:", err);
+            return res.status(500).send("Trace error");
+          }
           res.type("image/svg+xml").send(svg);
         }
       );
       return;
     }
 
-    // --- Multi-color via K-means ---
-    console.log(`🎨 multi-color (${colorCount}) using k-means`);
-
+    // --- Multi-color via clustering ---
+    console.log(`🎨 multi-color mode (${colorCount})`);
     const { data, info } = await sharp(baseFile)
       .raw()
       .toBuffer({ resolveWithObject: true });
 
     const pixels = [];
-    for (let i = 0; i < data.length; i += info.channels) {
+    for (let i = 0; i < data.length; i += info.channels)
       pixels.push([data[i], data[i + 1], data[i + 2]]);
-    }
 
     const centers = kmeans(pixels, colorCount);
-    console.log("🎯 centers:", centers.map((c) => c.map((v) => Math.round(v))));
+    console.log("🎯 cluster centers:", centers.map((c) => c.map((v) => v.toFixed(0))));
 
     const layers = [];
 
     for (let i = 0; i < centers.length; i++) {
       const [rC, gC, bC] = centers[i];
       const mask = Buffer.alloc(info.width * info.height * 3);
+
+      // larger tolerance to unify same-color areas
+      const tol = 5000;
       for (let p = 0, px = 0; p < data.length; p += info.channels, px++) {
         const diff =
           (data[p] - rC) ** 2 +
           (data[p + 1] - gC) ** 2 +
           (data[p + 2] - bC) ** 2;
-        const val = diff < 4000 ? 255 : 0; // tolerance for cluster
+        const val = diff < tol ? 255 : 0;
         mask[px * 3] = mask[px * 3 + 1] = mask[px * 3 + 2] = val;
       }
 
       const maskFile = path.join(tmpDir, `${base}-mask${i}.png`);
+      // extra blur + threshold to seal small leaks
       await sharp(mask, {
         raw: { width: info.width, height: info.height, channels: 3 },
       })
+        .blur(0.6)
+        .threshold(128)
         .png()
         .toFile(maskFile);
 
@@ -131,7 +140,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       const svgPart = await new Promise((resolve, reject) => {
         potrace.trace(
           maskFile,
-          { color, background: "transparent", turdSize: 5 },
+          { color, background: "transparent", turdSize: 3 },
           (err, svg) => {
             fs.unlink(maskFile, () => {});
             if (err) reject(err);
@@ -139,6 +148,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
           }
         );
       });
+
       layers.push(svgPart.replace(/<\/?svg[^>]*>/g, ""));
     }
 
@@ -147,6 +157,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       ${layers.join("\n")}
     </svg>`;
 
+    console.log("✅ finished vectorization");
     res.type("image/svg+xml").send(svg);
   } catch (err) {
     console.error("🔥 trace exception:", err);
@@ -158,4 +169,6 @@ app.get("*", (_, res) =>
   res.sendFile(path.join(__dirname, "public", "index.html"))
 );
 
-app.listen(port, () => console.log(`🚀 Vectorizer running on port ${port}`));
+app.listen(port, () =>
+  console.log(`🚀 Vectorizer running on port ${port}`)
+);
