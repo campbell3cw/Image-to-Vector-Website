@@ -5,22 +5,23 @@ import sharp from "sharp";
 import { Potrace } from "potrace";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Middleware
-app.use(express.static("."));
-app.use(express.json());
+// Serve static assets (HTML, CSS, JS, images)
+app.use(express.static(__dirname));
 
 // Multer setup (in-memory)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Health check for Railway
-app.get("/healthz", (req, res) => {
-  res.status(200).send("ok");
-});
+// Health check
+app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
 // Adaptive threshold helper
 async function getAdaptiveThreshold(buffer) {
@@ -35,8 +36,6 @@ async function getAdaptiveThreshold(buffer) {
     const mean = pixels.reduce((a, b) => a + b, 0) / pixels.length;
     const variance = pixels.reduce((a, b) => a + (b - mean) ** 2, 0) / pixels.length;
     const stdDev = Math.sqrt(variance);
-
-    // Dynamic threshold logic
     const threshold = Math.max(60, Math.min(220, mean + stdDev * 0.5));
     return threshold;
   } catch (err) {
@@ -63,29 +62,25 @@ app.post("/trace", upload.single("image"), async (req, res) => {
 
     let buffer = req.file.buffer;
 
-    // Preprocess: resize and optional blur/smooth
+    // Preprocess image
     let img = sharp(buffer).resize({ width: Number(long), withoutEnlargement: true }).greyscale();
-
-    if (smooth) img = img.median(1); // reduces noise
+    if (smooth) img = img.median(1);
     if (blur && Number(blur) > 0) img = img.blur(Number(blur));
-
     buffer = await img.toBuffer();
 
-    // Auto-threshold if requested
+    // Adaptive threshold
     let thVal = Number(threshold);
     if (adaptive === true || adaptive === "true") {
       thVal = await getAdaptiveThreshold(buffer);
       console.log("Adaptive threshold used:", thVal);
     }
 
-    // Binarize image for tracing
-    const bwBuffer = await sharp(buffer)
-      .threshold(Math.round(thVal))
-      .toBuffer();
+    // Convert to binary
+    const bwBuffer = await sharp(buffer).threshold(Math.round(thVal)).toBuffer();
 
-    // Vectorize using Potrace
+    // Vectorize
     const options = {
-      threshold: 128, // Potrace uses binary input; threshold is handled above
+      threshold: 128,
       turdSize: Number(omit) || 5,
       ltres: Number(ltres) || 1,
       qtres: Number(qtres) || 1,
@@ -112,12 +107,11 @@ app.post("/trace", upload.single("image"), async (req, res) => {
   }
 });
 
-// Root route
+// Serve index.html properly
 app.get("/", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "index.html"));
+  res.sendFile(path.join(__dirname, "index.html"));
 });
 
-// Start server
 app.listen(port, () => {
   console.log(`✅ At Work Uniforms Vectorizer running on port ${port}`);
 });
