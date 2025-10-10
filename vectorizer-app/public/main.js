@@ -1,151 +1,169 @@
-document.addEventListener("DOMContentLoaded", () => {
-  const dropzone = document.getElementById("dropzone");
-  const fileInput = document.getElementById("file");
-  const browse = document.getElementById("browse");
-  const previewContainer = document.getElementById("preview-container");
-  const vectorContainer  = document.getElementById("vector-container");
-  const btnVectorize = document.getElementById("vectorize");
-  const btnDownload = document.getElementById("download");
-  const btnOutline  = document.getElementById("outline");
-  const tuningToggle = document.getElementById("tuningToggle");
-  const tuningPanel = document.getElementById("tuning-panel");
-  const applyTune = document.getElementById("applyTune");
-  const resetTune = document.getElementById("resetTune");
+// main.js
+const fileInput = document.getElementById("file");
+const dropzone = document.getElementById("dropzone");
+const browseLink = document.getElementById("browse");
+const vectorizeBtn = document.getElementById("vectorize");
+const downloadBtn = document.getElementById("download");
+const outlineBtn = document.getElementById("outline");
+const spinnerOverlay = document.getElementById("spinner-overlay");
+const previewContainer = document.getElementById("preview-container");
+const vectorContainer = document.getElementById("vector-container");
+const applyTune = document.getElementById("applyTune");
+const resetTune = document.getElementById("resetTune");
+const tuningPanel = document.getElementById("tuning-panel");
 
-  const presets = {
-    logo:  { th:200, blur:0.8, long:700, omit:5, lt:0.8, qt:1.0 },
-    badge: { th:180, blur:1.2, long:800, omit:8, lt:1.0, qt:0.9 },
-    fine:  { th:165, blur:1.6, long:1000, omit:4, lt:1.2, qt:0.8 }
+// Slider inputs
+const sliders = ["th", "blur", "omit", "lt", "qt", "long"];
+const sliderMap = {};
+sliders.forEach((id) => {
+  sliderMap[id] = {
+    range: document.getElementById(id),
+    num: document.getElementById(id + "_num"),
   };
+});
+const colorSlider = { range: null, num: null }; // we'll create it dynamically below
 
-  const ids = ["th","blur","long","omit","lt","qt"];
-  const inputs = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
-  const nums   = Object.fromEntries(ids.map(id => [id, document.getElementById(id + "_num")]));
+let uploadedFile = null;
+let currentSVG = null;
 
-  let uploadedFile = null;
-  let lastSVG = null;
-  let debounceTimer = null;
+// ========== UI SETUP ==========
+browseLink.onclick = (e) => {
+  e.preventDefault();
+  fileInput.click();
+};
 
-  const applyToggleState = () => {
-    if (tuningToggle.checked) {
-      tuningPanel.style.display = "block";
-      tuningPanel.style.maxHeight = "1200px";
-      tuningPanel.style.opacity = "1";
-    } else {
-      tuningPanel.style.maxHeight = "0";
-      tuningPanel.style.opacity = "0";
-      setTimeout(() => { if (!tuningToggle.checked) tuningPanel.style.display = "none"; }, 250);
-    }
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (file) handleFile(file);
+};
+
+dropzone.ondragover = (e) => {
+  e.preventDefault();
+  dropzone.classList.add("hover");
+};
+dropzone.ondragleave = () => dropzone.classList.remove("hover");
+dropzone.ondrop = (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("hover");
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+};
+
+function handleFile(file) {
+  uploadedFile = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    previewContainer.innerHTML = `<img src="${ev.target.result}" class="preview-img"/>`;
   };
-  tuningToggle.addEventListener("change", applyToggleState);
-  applyToggleState();
+  reader.readAsDataURL(file);
+}
 
-  // Drag-drop & browse
-  browse?.addEventListener("click", (e) => { e.preventDefault(); fileInput.click(); });
-  dropzone.addEventListener("dragover", e => { e.preventDefault(); dropzone.classList.add("hover"); });
-  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("hover"));
-  dropzone.addEventListener("drop", e => {
-    e.preventDefault(); dropzone.classList.remove("hover");
-    const f = e.dataTransfer?.files?.[0]; if (f) handleFile(f);
-  });
-  fileInput.addEventListener("change", e => { const f = e.target.files?.[0]; if (f) handleFile(f); });
+// ========== VECTORIZE ==========
+async function vectorizeImage() {
+  if (!uploadedFile) return alert("Please upload an image first.");
 
-  function handleFile(file) {
-    uploadedFile = file;
-    btnVectorize.disabled = false;
-    const r = new FileReader();
-    r.onload = (ev) => (previewContainer.innerHTML = `<img src="${ev.target.result}" class="preview-img" alt="preview">`);
-    r.readAsDataURL(file);
-    vectorContainer.innerHTML = "<p>Ready to vectorize…</p>";
-    lastSVG = null;
-    btnDownload.style.display = "none";
-    btnOutline.style.display  = "none";
-  }
+  spinnerOverlay.style.display = "flex";
+  downloadBtn.style.display = "none";
+  outlineBtn.style.display = "none";
 
-  // Spinner helpers
-  const spinner = document.getElementById("spinner-overlay");
-  const showSpinner = () => spinner.style.display = "flex";
-  const hideSpinner = () => spinner.style.display = "none";
+  try {
+    const formData = new FormData();
+    formData.append("image", uploadedFile);
 
-  const getTuneParams = () => {
-    if (!tuningToggle.checked) return "";
-    return "?" + ids.map(id => `${id}=${encodeURIComponent(inputs[id].value)}`).join("&");
-  };
+    // collect tuning params
+    const params = {
+      th: sliderMap.th.range.value,
+      blur: sliderMap.blur.range.value,
+      omit: sliderMap.omit.range.value,
+      lt: sliderMap.lt.range.value,
+      qt: sliderMap.qt.range.value,
+      long: sliderMap.long.range.value,
+      colors: colorSlider.range ? colorSlider.range.value : 1,
+    };
 
-  async function runVectorize(auto=false) {
-    if (!uploadedFile) return;
-    showSpinner();
-    vectorContainer.innerHTML = auto ? "<p>Auto updating…</p>" : "<p>Processing…</p>";
-    const form = new FormData(); form.append("image", uploadedFile);
-    try {
-      const res = await fetch("/trace" + getTuneParams(), { method:"POST", body: form });
-      if (!res.ok) { vectorContainer.innerHTML = `<p style='color:#b00020'>${await res.text()}</p>`; hideSpinner(); return; }
-      const svg = await res.text();
-      lastSVG = svg;
-      vectorContainer.innerHTML = svg;
-      btnDownload.style.display = "inline-block";
-      btnOutline.style.display  = "inline-block";
-    } catch (e) {
-      vectorContainer.innerHTML = "<p style='color:#b00020'>Network error</p>";
-      console.error(e);
-    } finally {
-      hideSpinner();
-    }
-  }
-
-  btnVectorize.addEventListener("click", () => runVectorize());
-  applyTune.addEventListener("click", () => runVectorize());
-  resetTune.addEventListener("click", () => {
-    const def = { th:180, blur:1.0, long:800, omit:5, lt:0.8, qt:1.0 };
-    for (const k in def) { inputs[k].value = def[k]; nums[k].value = def[k]; }
-  });
-
-  // Link range + number inputs, auto re-vectorize on change
-  ids.forEach(id => {
-    const range = inputs[id], num = nums[id];
-    range.addEventListener("input", () => { num.value = range.value; });
-    num.addEventListener("input", () => { range.value = num.value; });
-    range.addEventListener("change", () => autoVectorize());
-    num.addEventListener("change", () => autoVectorize());
-  });
-  function autoVectorize() {
-    if (!uploadedFile) return;
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => runVectorize(true), 600);
-  }
-
-  // Presets
-  document.querySelectorAll("#preset-row button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const p = presets[btn.dataset.preset];
-      for (const k in p) { inputs[k].value = p[k]; nums[k].value = p[k]; }
-      runVectorize(true);
+    const query = new URLSearchParams(params).toString();
+    const resp = await fetch(`/trace?${query}`, {
+      method: "POST",
+      body: formData,
     });
-  });
 
-  // Download SVG
-  btnDownload.addEventListener("click", () => {
-    if (!lastSVG) return;
-    const blob = new Blob([lastSVG], { type: "image/svg+xml" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "vectorized.svg"; a.click();
-    URL.revokeObjectURL(url);
-  });
+    if (!resp.ok) throw new Error("Vectorization failed");
+    const svg = await resp.text();
+    currentSVG = svg;
 
-  // Outline preview
-  btnOutline.addEventListener("click", () => {
-    if (!lastSVG) return;
-    const doc = new DOMParser().parseFromString(lastSVG, "image/svg+xml");
-    const svgRoot = doc.documentElement;
-    const style = doc.createElementNS("http://www.w3.org/2000/svg", "style");
-    style.textContent = "path,polygon,polyline,rect,circle,ellipse,line{fill:none;stroke:black;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round}";
-    svgRoot.insertBefore(style, svgRoot.firstChild);
-    svgRoot.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line").forEach(n=>{
-      n.removeAttribute("fill"); n.removeAttribute("stroke"); n.removeAttribute("stroke-width");
-    });
-    const xml = new XMLSerializer().serializeToString(doc);
-    const blob = new Blob([xml], { type:"image/svg+xml" });
-    const url  = URL.createObjectURL(blob);
-    window.open(url, "_blank");
+    vectorContainer.innerHTML = svg;
+    downloadBtn.style.display = "inline-block";
+    outlineBtn.style.display = "inline-block";
+  } catch (err) {
+    console.error(err);
+    alert("Vectorization failed. Check console for details.");
+  } finally {
+    spinnerOverlay.style.display = "none";
+  }
+}
+
+// ========== DOWNLOAD ==========
+downloadBtn.onclick = () => {
+  if (!currentSVG) return;
+  const blob = new Blob([currentSVG], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "vectorized.svg";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// ========== OUTLINE PREVIEW ==========
+outlineBtn.onclick = () => {
+  if (!currentSVG) return;
+  const outlined = currentSVG.replace(
+    /fill="(.*?)"/g,
+    'fill="none" stroke="black" stroke-width="1"'
+  );
+  const win = window.open();
+  win.document.write(outlined);
+};
+
+// ========== ADD COLOR SLIDER ==========
+function createColorSlider() {
+  const tuningGrid = document.getElementById("tuning-grid");
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = `
+    <label>Color Count</label>
+    <div class="slider-wrap">
+      <input id="colors" type="range" min="1" max="4" step="1" value="1" class="slider-input" />
+      <input id="colors_num" type="number" min="1" max="4" value="1" />
+    </div>
+  `;
+  tuningGrid.appendChild(wrapper);
+
+  colorSlider.range = document.getElementById("colors");
+  colorSlider.num = document.getElementById("colors_num");
+
+  // sync
+  colorSlider.range.addEventListener("input", () => {
+    colorSlider.num.value = colorSlider.range.value;
   });
+  colorSlider.num.addEventListener("input", () => {
+    colorSlider.range.value = colorSlider.num.value;
+  });
+}
+createColorSlider();
+
+// ========== APPLY TUNE / RESET ==========
+applyTune.onclick = () => vectorizeImage();
+vectorizeBtn.onclick = () => vectorizeImage();
+
+resetTune.onclick = () => {
+  Object.values(sliderMap).forEach((pair) => {
+    pair.range.value = pair.num.value = pair.range.defaultValue;
+  });
+  if (colorSlider.range) colorSlider.range.value = colorSlider.num.value = 1;
+};
+
+// Keep number + slider in sync
+Object.values(sliderMap).forEach((pair) => {
+  pair.range.addEventListener("input", () => (pair.num.value = pair.range.value));
+  pair.num.addEventListener("input", () => (pair.range.value = pair.num.value));
 });
