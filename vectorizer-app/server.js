@@ -10,7 +10,6 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const app = express();
 const port = process.env.PORT || 8080;
 
@@ -19,12 +18,11 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
-/* ---------------- Simple K-means clustering ---------------- */
+// ---------- simple K-means ----------
 function kmeans(pixels, k, maxIter = 6) {
   const centroids = [];
   for (let i = 0; i < k; i++)
     centroids.push(pixels[Math.floor(Math.random() * pixels.length)]);
-
   for (let iter = 0; iter < maxIter; iter++) {
     const clusters = Array.from({ length: k }, () => []);
     for (const p of pixels) {
@@ -54,7 +52,7 @@ function kmeans(pixels, k, maxIter = 6) {
   return centroids;
 }
 
-/* ---------------------- /trace ---------------------- */
+// ---------- /trace ----------
 app.post("/trace", upload.single("image"), async (req, res) => {
   console.log("📤 /trace called");
   try {
@@ -69,24 +67,18 @@ app.post("/trace", upload.single("image"), async (req, res) => {
     const base = `trace-${Date.now()}`;
     const baseFile = path.join(tmpDir, `${base}-base.png`);
 
-    // --- Preprocess (keep detail) ---
+    // --- Preprocess: resize + median filter (no blur) ---
     await sharp(req.file.buffer)
       .resize({ width, withoutEnlargement: true })
       .toColorspace("srgb")
       .median(1)
-      .blur(0.1)
       .png()
       .toFile(baseFile);
 
-    /* ---------- Single color mode (Embroidery clean) ---------- */
+    // ---------- single-color mode ----------
     if (colorCount === 1) {
       console.log("🖤 single-color mode");
-      // make sure input is binary thresholded before Potrace
-      const bwBuf = await sharp(baseFile)
-        .greyscale()
-        .threshold(180)
-        .toBuffer();
-
+      const bwBuf = await sharp(baseFile).greyscale().threshold(180).toBuffer();
       const bwFile = path.join(tmpDir, `${base}-bw.png`);
       fs.writeFileSync(bwFile, bwBuf);
 
@@ -97,7 +89,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
           fs.unlink(bwFile, () => {});
           fs.unlink(baseFile, () => {});
           if (err) {
-            console.error("Potrace error:", err);
+            console.error("❌ Potrace error:", err);
             return res.status(500).send("Trace error");
           }
           res.type("image/svg+xml").send(svg);
@@ -106,7 +98,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       return;
     }
 
-    /* ---------- Multi-color mode ---------- */
+    // ---------- multi-color ----------
     console.log(`🎨 multi-color mode (${colorCount})`);
     const { data, info } = await sharp(baseFile)
       .raw()
@@ -117,14 +109,12 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       pixels.push([data[i], data[i + 1], data[i + 2]]);
 
     const centers = kmeans(pixels, colorCount);
-    console.log("🎯 cluster centers:", centers.map((c) => c.map((v) => v.toFixed(0))));
+    console.log("🎯 cluster centers:", centers.map((c) => c.map((v) => Math.round(v))));
 
     const layers = [];
-
     for (let i = 0; i < centers.length; i++) {
       const [rC, gC, bC] = centers[i];
       const mask = Buffer.alloc(info.width * info.height * 3);
-
       const tol = 4000;
       let active = 0;
       for (let p = 0, px = 0; p < data.length; p += info.channels, px++) {
@@ -136,9 +126,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
         if (val === 255) active++;
         mask[px * 3] = mask[px * 3 + 1] = mask[px * 3 + 2] = val;
       }
-
-      // skip empty layers
-      if (active < 1000) continue;
+      if (active < 1000) continue; // skip empty
 
       const maskFile = path.join(tmpDir, `${base}-mask${i}.png`);
       await sharp(mask, {
@@ -168,7 +156,6 @@ app.post("/trace", upload.single("image"), async (req, res) => {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${info.width} ${info.height}">
       ${layers.join("\n")}
     </svg>`;
-
     console.log("✅ finished vectorization");
     res.type("image/svg+xml").send(svg);
   } catch (err) {
@@ -177,11 +164,9 @@ app.post("/trace", upload.single("image"), async (req, res) => {
   }
 });
 
-/* ---------------------- Serve index ---------------------- */
 app.get("*", (_, res) =>
   res.sendFile(path.join(__dirname, "public", "index.html"))
 );
-
-app.listen(port, () => {
-  console.log(`🚀 Vectorizer running on port ${port}`);
-});
+app.listen(port, () =>
+  console.log(`🚀 Vectorizer running on port ${port}`)
+);
