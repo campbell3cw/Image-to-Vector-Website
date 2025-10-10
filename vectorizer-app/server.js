@@ -24,92 +24,88 @@ app.post("/trace", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("No image uploaded");
 
-    // query/body controls
     const colorCount = parseInt(req.query.colors || req.body.colors || "1");
+    const width = parseInt(req.query.long || req.body.long || "800");
     const tmpDir = os.tmpdir();
     const tmpBase = `trace-${Date.now()}`;
-    const width = parseInt(req.query.long || req.body.long || "800");
+    const tmpPng = path.join(tmpDir, `${tmpBase}-base.png`);
 
-    // preprocess → resized PNG
-    const basePng = await sharp(req.file.buffer)
+    // --- Step 1: normalize image ---
+    await sharp(req.file.buffer)
       .resize({ width, withoutEnlargement: true })
-      .toFormat("png")
-      .toBuffer();
+      .toColorspace("srgb")
+      .png({ palette: true })
+      .toFile(tmpPng);
 
-    // single-color mode (current behavior)
+    // --- Step 2: single-color trace (old behavior) ---
     if (colorCount <= 1) {
-      const bwFile = path.join(tmpDir, `${tmpBase}-bw.png`);
-      await sharp(basePng).greyscale().threshold(180).toFile(bwFile);
-
       potrace.trace(
-        bwFile,
+        tmpPng,
         { color: "black", background: "white", turdSize: 5 },
         (err, svg) => {
-          fs.unlink(bwFile, () => {});
-          if (err) return res.status(500).send("Trace error");
+          fs.unlink(tmpPng, () => {});
+          if (err) {
+            console.error("Potrace error:", err);
+            return res.status(500).send("Trace error");
+          }
           res.type("image/svg+xml").send(svg);
         }
       );
       return;
     }
 
-    // --- Multi-color mode ---
-    // Quantize to N colors
-    const { data, info } = await sharp(basePng)
-      .resize({ width, withoutEnlargement: true })
-      .toColorspace("srgb")
-      .quantize({ colors: colorCount })
+    // --- Step 3: multi-color trace ---
+    // Reduce to N colors using posterize
+    const quantBuf = await sharp(tmpPng)
+      .modulate({ brightness: 1, saturation: 1 })
+      .posterize(colorCount)
+      .toBuffer();
+
+    // Extract unique colors (simple sampling)
+    const { data, info } = await sharp(quantBuf)
       .raw()
       .toBuffer({ resolveWithObject: true });
-
-    // Extract unique palette from quantized data
-    const pixels = [];
+    const unique = new Set();
     for (let i = 0; i < data.length; i += info.channels) {
-      pixels.push(
-        `${data[i]},${data[i + 1]},${data[i + 2]}` // ignore alpha
-      );
+      unique.add(`${data[i]},${data[i + 1]},${data[i + 2]}`);
     }
-    const palette = [...new Set(pixels)].slice(0, colorCount);
+    const palette = Array.from(unique).slice(0, colorCount);
+    console.log("🎨 Palette:", palette);
 
-    // Build each mask + trace
+    // Build mask + trace for each color
     const layers = [];
-    for (let idx = 0; idx < palette.length; idx++) {
-      const [r, g, b] = palette[idx].split(",").map(Number);
-      const mask = await sharp(basePng)
-        .removeAlpha()
-        .extractChannel("red") // dummy, we’ll threshold by color below
-        .toBuffer();
+    for (const color of palette) {
+      const [r, g, b] = color.split(",").map(Number);
+      const maskFile = path.join(tmpDir, `${tmpBase}-${r}-${g}-${b}.png`);
 
-      const maskFile = path.join(tmpDir, `${tmpBase}-${idx}.png`);
-      await sharp(basePng)
+      // isolate one color as white, rest black
+      const maskBuf = await sharp(quantBuf)
         .ensureAlpha()
-        .joinChannel(
-          await sharp(basePng)
-            .toColourspace("srgb")
-            .linear(1, 0)
-            .recomb([
-              [1, 0, 0],
-              [0, 1, 0],
-              [0, 0, 1],
-            ])
-            .toBuffer()
-        )
-        .toFile(maskFile);
+        .raw()
+        .toBuffer({ resolveWithObject: true });
 
-      await sharp(basePng)
-        .extractChannel("red")
-        .toFile(maskFile);
+      const pixels = maskBuf.data;
+      const ch = maskBuf.info.channels;
+      const out = Buffer.alloc(pixels.length);
+      for (let i = 0; i < pixels.length; i += ch) {
+        const diff =
+          Math.abs(pixels[i] - r) +
+          Math.abs(pixels[i + 1] - g) +
+          Math.abs(pixels[i + 2] - b);
+        const val = diff < 30 ? 255 : 0;
+        out[i] = out[i + 1] = out[i + 2] = val;
+      }
 
-      await sharp(basePng)
-        .threshold(180)
+      await sharp(out, {
+        raw: { width: maskBuf.info.width, height: maskBuf.info.height, channels: 3 },
+      })
         .png()
         .toFile(maskFile);
 
-      // Trace each color mask
       const svgPart = await new Promise((resolve, reject) => {
         potrace.trace(
           maskFile,
-          { color: `rgb(${r},${g},${b})`, background: "transparent" },
+          { color: `rgb(${r},${g},${b})`, background: "transparent", turdSize: 5 },
           (err, svg) => {
             fs.unlink(maskFile, () => {});
             if (err) reject(err);
@@ -118,14 +114,11 @@ app.post("/trace", upload.single("image"), async (req, res) => {
         );
       });
 
-      // strip outer <svg> and just keep <path>
-      const paths = svgPart
-        .replace(/<\/?svg[^>]*>/g, "")
-        .replace(/<\/?g[^>]*>/g, "");
+      const paths = svgPart.replace(/<\/?svg[^>]*>/g, "");
       layers.push(paths);
     }
 
-    // Combine layers into one SVG
+    fs.unlink(tmpPng, () => {});
     const finalSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${width}">
       ${layers.join("\n")}
     </svg>`;
