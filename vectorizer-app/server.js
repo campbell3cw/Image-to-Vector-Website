@@ -3,7 +3,6 @@ import express from "express";
 import multer from "multer";
 import sharp from "sharp";
 import { Potrace } from "potrace";
-import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -13,20 +12,20 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Serve static assets (HTML, CSS, JS, images)
-app.use(express.static(__dirname));
+// Serve all static files from /public
+app.use(express.static(path.join(__dirname, "public")));
 
-// Multer setup (in-memory)
+// Multer (in-memory)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Health check
+// Health check endpoint for Railway
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
-// Adaptive threshold helper
+// --- Adaptive threshold helper ---
 async function getAdaptiveThreshold(buffer) {
   try {
-    const { data, info } = await sharp(buffer)
+    const { data } = await sharp(buffer)
       .greyscale()
       .resize({ width: 200 })
       .raw()
@@ -44,7 +43,7 @@ async function getAdaptiveThreshold(buffer) {
   }
 }
 
-// POST /trace endpoint
+// --- POST /trace ---
 app.post("/trace", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("No image uploaded");
@@ -61,24 +60,23 @@ app.post("/trace", upload.single("image"), async (req, res) => {
     } = req.body;
 
     let buffer = req.file.buffer;
-
-    // Preprocess image
     let img = sharp(buffer).resize({ width: Number(long), withoutEnlargement: true }).greyscale();
+
     if (smooth) img = img.median(1);
     if (blur && Number(blur) > 0) img = img.blur(Number(blur));
+
     buffer = await img.toBuffer();
 
-    // Adaptive threshold
+    // Adaptive thresholding
     let thVal = Number(threshold);
     if (adaptive === true || adaptive === "true") {
       thVal = await getAdaptiveThreshold(buffer);
       console.log("Adaptive threshold used:", thVal);
     }
 
-    // Convert to binary
     const bwBuffer = await sharp(buffer).threshold(Math.round(thVal)).toBuffer();
 
-    // Vectorize
+    // Potrace vectorization options
     const options = {
       threshold: 128,
       turdSize: Number(omit) || 5,
@@ -107,11 +105,12 @@ app.post("/trace", upload.single("image"), async (req, res) => {
   }
 });
 
-// Serve index.html properly
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+// --- Serve index.html for all other routes ---
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+// --- Start server ---
 app.listen(port, () => {
   console.log(`✅ At Work Uniforms Vectorizer running on port ${port}`);
 });
