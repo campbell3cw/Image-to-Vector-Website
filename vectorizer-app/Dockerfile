@@ -1,18 +1,24 @@
+# Use Node.js 20 Alpine base image
 FROM node:20-alpine
 
-# Sharp dependency
+# Sharp needs this on Alpine
 RUN apk add --no-cache libc6-compat
 
+# Set working directory
 WORKDIR /app
 
-# Install dependencies
+# Copy and install dependencies
 COPY package.json ./
 RUN npm ci --omit=dev
 
-# Copy app files (all root-level frontend assets)
+# Copy all project files (server.js, index.html, CSS, JS, etc.)
 COPY . .
 
+# Set environment variables
 ENV PORT=8080
+
+# Expose port
 EXPOSE 8080
 
+# Start the app
 CMD ["npm", "start"]
