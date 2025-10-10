@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>At Work Uniforms Vector Tool</title>
+  <link rel="icon" href="./hammer.JPG" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header>
+    <img src="./hammer.JPG" alt="At Work Uniforms Logo" id="logo" />
+  </header>
+
+  <!-- Spinner Overlay -->
+  <div id="spinner-overlay">
+    <div class="spinner"></div>
+    <p>Processing… Please wait</p>
+  </div>
+
+  <div class="wrap">
+    <div id="dropzone" class="dropzone">
+      <p>Drag & Drop image here or <a href="#" id="browse">browse</a></p>
+      <input type="file" id="file" accept="image/*" style="display:none" />
+    </div>
+
+    <div style="text-align:center;">
+      <button id="vectorize">Vectorize (B/W)</button>
+      <button id="download" style="display:none;">Download SVG</button>
+      <button id="outline" style="display:none;">Preview Outline</button>
+      <label style="margin-left:10px;">
+        <input type="checkbox" id="tuningToggle" checked />
+        High-Quality Tuning
+      </label>
+    </div>
+
+    <div id="panel-grid">
+      <div class="panel">
+        <h3>Preview</h3>
+        <div id="preview-container"><p>No image loaded.</p></div>
+      </div>
+      <div class="panel">
+        <h3>Vector Result</h3>
+        <div id="vector-container"><p>No vector yet.</p></div>
+      </div>
+    </div>
+
+    <section id="tuning-panel">
+      <h3>High-Quality Tuning</h3>
+
+      <div id="preset-row" class="preset-row" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="secondary" data-preset="logo">Logo (Sharp)</button>
+        <button class="secondary" data-preset="badge">Badge (Balanced)</button>
+        <button class="secondary" data-preset="fine">Fine Detail (Soft)</button>
+      </div>
+
+      <div id="tuning-grid">
+        <div>
+          <label>Threshold</label>
+          <div class="slider-wrap">
+            <input id="th" type="range" min="0" max="255" step="1" value="180" class="slider-input" />
+            <input id="th_num" type="number" min="0" max="255" value="180" />
+          </div>
+        </div>
+        <div>
+          <label>Blur</label>
+          <div class="slider-wrap">
+            <input id="blur" type="range" min="0" max="5" step="0.1" value="1.0" class="slider-input" />
+            <input id="blur_num" type="number" step="0.1" value="1.0" />
+          </div>
+        </div>
+        <div>
+          <label>Long Side (px)</label>
+          <div class="slider-wrap">
+            <input id="long" type="range" min="200" max="2000" step="50" value="800" class="slider-input" />
+            <input id="long_num" type="number" value="800" />
+          </div>
+        </div>
+        <div>
+          <label>Path Omit</label>
+          <div class="slider-wrap">
+            <input id="omit" type="range" min="1" max="20" step="1" value="5" class="slider-input" />
+            <input id="omit_num" type="number" value="5" />
+          </div>
+        </div>
+        <div>
+          <label>ltres</label>
+          <div class="slider-wrap">
+            <input id="lt" type="range" min="0.5" max="3.0" step="0.1" value="0.8" class="slider-input" />
+            <input id="lt_num" type="number" step="0.1" value="0.8" />
+          </div>
+        </div>
+        <div>
+          <label>qtres</label>
+          <div class="slider-wrap">
+            <input id="qt" type="range" min="0.5" max="3.0" step="0.1" value="1.0" class="slider-input" />
+            <input id="qt_num" type="number" step="0.1" value="1.0" />
+          </div>
+        </div>
+      </div>
+
+      <div id="tuning-actions" style="margin-top:10px;">
+        <button id="applyTune" class="secondary">Vectorize with These Settings</button>
+        <button id="resetTune" class="secondary" style="background:#777;">Reset Defaults</button>
+      </div>
+
+      <p class="note">Adjust sliders to auto-preview your embroidery vector. Presets provide a good starting point.</p>
+    </section>
+  </div>
+
+  <footer>
+    <p style="text-align:center;font-size:.85em;color:#777;margin:30px 0;">© At Work Uniforms</p>
+  </footer>
+
+  <script src="./main.js"></script>
+</body>
+</html>
