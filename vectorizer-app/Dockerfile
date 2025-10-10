@@ -1,24 +1,19 @@
-# Use Node.js 20 Alpine base image
-FROM node:20-alpine
+# Use full Debian base image for Sharp + Potrace compatibility
+FROM node:20-slim
 
-# Sharp needs this on Alpine
-RUN apk add --no-cache libc6-compat
+# Install system dependencies for Sharp and Potrace
+RUN apt-get update && apt-get install -y \
+    libc6 libjpeg-dev libpng-dev potrace \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy and install dependencies
 COPY package.json ./
 RUN npm ci --omit=dev
 
-# Copy all project files (server.js, index.html, CSS, JS, etc.)
 COPY . .
 
-# Set environment variables
 ENV PORT=8080
-
-# Expose port
 EXPOSE 8080
 
-# Start the app
 CMD ["npm", "start"]
