@@ -30,7 +30,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
     const base = `trace-${Date.now()}`;
     const baseFile = path.join(tmpDir, `${base}-base.png`);
 
-    // --- Step 1: normalize & resize while keeping aspect ratio ---
+    // --- Step 1: normalize and maintain aspect ratio ---
     const meta = await sharp(req.file.buffer).metadata();
     const aspect = meta.width / meta.height;
     const targetHeight = Math.round(targetWidth / aspect);
@@ -42,7 +42,7 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       .png()
       .toFile(baseFile);
 
-    // ---- Single color (unchanged) ----
+    // ---- Single color (works perfectly) ----
     if (colorCount <= 1) {
       console.log("🖤 single-color mode");
       potrace.trace(
@@ -60,14 +60,14 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       return;
     }
 
-    // ---- Multi-color improved ----
+    // ---- Multi-color mode with histogram-based thresholds ----
     console.log(`🎨 multi-color mode (${colorCount} colors)`);
 
     const { data, info } = await sharp(baseFile)
+      .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    // Build brightness map + store rgb for sampling
     const pxCount = info.width * info.height;
     const gray = new Float32Array(pxCount);
     const rgb = new Array(pxCount);
@@ -79,25 +79,38 @@ app.post("/trace", upload.single("image"), async (req, res) => {
       rgb[p] = [r, g, b];
     }
 
-    const min = Math.min(...gray);
-    const max = Math.max(...gray);
-    const step = (max - min) / colorCount;
-
-    const bands = [];
-    for (let i = 0; i < colorCount; i++) {
-      bands.push([min + step * i, min + step * (i + 1)]);
+    // Build histogram (256 bins)
+    const bins = new Array(256).fill(0);
+    for (let i = 0; i < gray.length; i++) {
+      bins[Math.floor(gray[i])] += 1;
     }
 
+    // Cumulative histogram → equal-frequency thresholds
+    const total = gray.length;
+    const cumulative = [];
+    bins.reduce((sum, v, i) => (cumulative[i] = sum + v), 0);
+    const thresholds = [];
+    for (let i = 1; i < colorCount; i++) {
+      const target = (total / colorCount) * i;
+      const idx = cumulative.findIndex((v) => v >= target);
+      thresholds.push(idx);
+    }
+
+    // Create bands from thresholds
+    const bounds = [0, ...thresholds, 255];
     const layers = [];
 
-    for (let i = 0; i < bands.length; i++) {
-      const [low, high] = bands[i];
-      const mask = Buffer.alloc(pxCount * 3);
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const low = bounds[i];
+      const high = bounds[i + 1];
+      console.log(`🔹 Band ${i + 1}: ${low}–${high}`);
 
+      const mask = Buffer.alloc(pxCount * 3);
       let rSum = 0,
         gSum = 0,
         bSum = 0,
         n = 0;
+
       for (let p = 0; p < pxCount; p++) {
         const val = gray[p];
         if (val >= low && val < high) {
